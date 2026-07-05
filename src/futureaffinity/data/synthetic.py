@@ -4,7 +4,7 @@ import torch
 
 from futureaffinity.config import FutureAffinityConfig
 from futureaffinity.data.datatypes import Batch, Example, collate
-from futureaffinity.datasources.mock_docking import MockDockingSource
+from futureaffinity.datasources.analytical_docking import AnalyticalDockingOracle
 
 _CONTACT_THRESHOLD_ANGSTROM = 8.0
 
@@ -81,7 +81,10 @@ def make_synthetic_example(
         example.has_affinity = True
 
         if include_docking:
-            docking_source = MockDockingSource(seed=seed)
+            # cheap settings here (few restarts/steps): synthetic-example generation just needs a
+            # plausible energy label, not a fully converged pose. The real docking demo uses the
+            # oracle's stronger defaults.
+            docking_source = AnalyticalDockingOracle(num_restarts=2, num_steps=20, seed=seed)
             best_pose = docking_source.dock(protein_coords, token_type[protein_length:], num_poses=1)[0]
             example.docking_energy = best_pose.energy
             example.has_docking = True

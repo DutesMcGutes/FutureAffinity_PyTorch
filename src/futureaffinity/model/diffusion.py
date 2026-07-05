@@ -6,6 +6,7 @@ import torch
 from torch import nn
 
 from futureaffinity.config import FutureAffinityConfig
+from futureaffinity.geometry import apply_rotation, center_coords, random_rotation_matrices
 from futureaffinity.model.pairformer import AttentionWithPairBias, Transition
 
 
@@ -120,8 +121,22 @@ class DiffusionModule(nn.Module):
         token_mask: torch.Tensor,
         generator: torch.Generator | None = None,
     ) -> torch.Tensor:
-        """Per-batch-element mean squared denoising error, EDM-weighted, masked to valid tokens."""
+        """Per-batch-element mean squared denoising error, EDM-weighted, masked to valid tokens.
+
+        The structure module is not intrinsically SE(3)-equivariant (see the ADR referenced in
+        the config), so equivariance is instilled by data: every target is centered (removing
+        translation) and, at train time, randomly rotated (removing any preferred orientation).
+        Over training this teaches the denoiser to be robust to global pose rather than baking it
+        into the architecture -- the same tradeoff AlphaFold3 makes.
+        """
         batch_size, device = coords.shape[0], coords.device
+
+        if self.config.center_coordinates:
+            coords = center_coords(coords, token_mask)
+        if self.config.augment_rotation:
+            rotation = random_rotation_matrices(batch_size, device=device, generator=generator)
+            coords = apply_rotation(coords, rotation) * token_mask[..., None].to(coords.dtype)
+
         log_sigma = torch.randn(batch_size, device=device, generator=generator) * 1.2 - 1.2
         sigma = log_sigma.exp()
 

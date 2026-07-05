@@ -41,9 +41,32 @@ pip install -e ".[dev]"       # pytest, ruff
 
 ```bash
 python scripts/run_demo.py                 # trains briefly on synthetic data, then predicts
+python scripts/evaluate.py                 # runs the metric harness (RMSD/lDDT/lDDT-PLI/TM/DockQ + affinity)
 python -m futureaffinity.training.train --steps 50 --preset tiny
+python -m futureaffinity.training.train --preset base --amp --grad-checkpoint --triangle-chunk 128   # scale knobs
 python -m pytest tests/ -q
 ```
+
+## What's real vs. documented-and-ready
+
+Cheap things are genuinely real and tested; expensive things (full training, real data at scale)
+are documented and wired to run, not executed here.
+
+- **Real & tested now:** the Pairformer trunk (triangle multiplicative update + triangle
+  attention), EDM diffusion with ensemble sampling, equivariance-by-augmentation (exact
+  translation-invariance + SO(3) rotation augmentation, `geometry.py`), the full metric suite
+  (`evaluation/metrics.py`: Kabsch RMSD, lDDT, lDDT-PLI, TM-score, DockQ, affinity Pearson/Spearman/
+  RMSE), a **real gradient-descent docking optimizer** on an analytical force field
+  (`datasources/analytical_docking.py`, not a random mock), scale hooks (gradient checkpointing,
+  chunked O(N³) triangle attention verified bit-identical, AMP, correct DDP scaffold), and an
+  **overfit-one-complex correctness proof** (`tests/test_overfit.py`: loss collapses, samples reach
+  ~1 Å RMSD).
+- **Real data paths, opt-in:** `data/rcsb.py` fetches genuine PDB complexes (free, no license),
+  `data/ligand_rdkit.py` adds real bonds/3D conformers when RDKit is installed, `data/esm_embeddings.py`
+  runs ESM2 on CPU. Vina/OpenMM adapters slot into the same docking interface.
+- **Documented, not run:** training the `base`/`large` config on real GPUs, real data curation.
+  See `docs/scaling.md` (compute budget), `docs/data-engineering.md` (splits/leakage),
+  `docs/evaluation.md` (metric failure modes), and `docs/adr/` (why each design choice).
 
 ```python
 from futureaffinity.config import FutureAffinityConfig
@@ -61,10 +84,12 @@ result = predict(model, protein_sequence="MKTAYIAKQ...", ligand_smiles="CC(=O)Oc
 See docs/architecture.md for the full data-flow diagram. Briefly:
 
 - `src/futureaffinity/model/`: embedding, Pairformer trunk, diffusion, and all five task heads
-- `src/futureaffinity/data/`: `Example`/`Batch` datatypes, synthetic data generator, PDBbind/BindingDB/ESM loaders
-- `src/futureaffinity/datasources/`: mock (dependency-free) and optional real (Vina/OpenMM) physics adapters
+- `src/futureaffinity/geometry.py`: centering, SO(3) rotations, Kabsch superposition
+- `src/futureaffinity/evaluation/`: the real metric suite (structure + affinity)
+- `src/futureaffinity/data/`: `Example`/`Batch` datatypes, synthetic generator, PDBbind/BindingDB/RCSB/RDKit/ESM loaders
+- `src/futureaffinity/datasources/`: the analytical docking optimizer + optional real (Vina/OpenMM) adapters
 - `src/futureaffinity/losses/`: masked multi-task loss aggregation
-- `src/futureaffinity/training/`, `src/futureaffinity/inference/`: the training loop and the predict() API
+- `src/futureaffinity/training/`: training loop, metrics, and DDP scaffold; `inference/`: the predict() API
 
 ## Data and weight policy
 

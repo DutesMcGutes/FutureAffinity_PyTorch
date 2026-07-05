@@ -28,6 +28,18 @@ class FutureAffinityConfig:
     # pairformer trunk
     num_trunk_blocks: int = 4
     trunk_dropout: float = 0.0
+    # scale/memory hooks (all off by default; see docs/scaling.md). Gradient checkpointing
+    # trades compute for activation memory; triangle attention is O(N^3) in tokens, so at
+    # base/large scale the query axis is processed in chunks of this many rows.
+    use_gradient_checkpointing: bool = False
+    triangle_attention_chunk_size: int | None = None
+
+    # equivariance strategy (see docs/adr/0002-non-equivariant-plus-augmentation.md):
+    # the structure module is a plain (non-equivariant) transformer, made robust to global
+    # rotation/translation by centering every target and augmenting with random rotations at
+    # train time -- the same choice AlphaFold3 makes, rather than a built-in-equivariant network.
+    center_coordinates: bool = True
+    augment_rotation: bool = True
 
     # diffusion module (EDM-style: Karras et al. parameterization)
     num_diffusion_steps: int = 20

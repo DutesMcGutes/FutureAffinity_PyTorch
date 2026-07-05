@@ -21,14 +21,24 @@ Specific simplifications, so they're not mistaken for bugs:
   not by differentiating through the reverse-diffusion loop. This matches how EDM-style models are
   normally trained, but it does mean the affinity/ddG/confidence heads only get gradient through
   their token/pair inputs, not through the specific sampled geometry.
-- **No chunking in triangle attention.** `TriangleAttention`'s logits tensor is `O(N^3)` in the
-  number of tokens -- fine at the `tiny` config's scale, a real memory concern at `base`/`large`
-  scale on long sequences. Real AlphaFold implementations chunk this; this pass doesn't.
-- **Ligands have no bonds.** Both the SMILES parser (`data/bindingdb.py`) and the SDF parser
-  (`data/pdbbind.py`) read atom composition only, not connectivity. `MockDockingSource`'s "ligand"
-  is an unconnected point cloud with a fixed template geometry.
-- **`MockDockingSource`'s energy is a toy Lennard-Jones + electrostatics term**, not a real force
-  field -- useful as cheap, plentiful synthetic pretraining signal, not as ground truth.
+- **Ligand bonds are optional, not default.** The base SMILES/SDF readers (`data/bindingdb.py`,
+  `data/pdbbind.py`) read atom composition only. Real connectivity and 3D conformers are available
+  through the optional RDKit path (`data/ligand_rdkit.py`) but aren't required.
+- **The docking oracle is a real optimizer on a *toy* force field.** `AnalyticalDockingOracle` does
+  genuine gradient-descent rigid-body pose minimization (not random sampling), but the
+  Lennard-Jones + toy-electrostatics potential is not parameterized to real chemistry and the ligand
+  is treated as rigid. It's a synthetic-supervision oracle, not a substitute for Vina/OpenMM (which
+  slot into the same interface).
+
+## What is *not* a limitation (things sometimes mistaken for gaps)
+
+- **Equivariance is handled** -- by centering + SO(3) augmentation, not built-in equivariant layers
+  (a deliberate choice; see docs/adr/0002). Translation-invariance is exact and tested.
+- **Triangle attention can be chunked** to control its `O(N^3)` memory
+  (`config.triangle_attention_chunk_size`), verified bit-identical to the unchunked path.
+- **Scale hooks exist** -- gradient checkpointing, AMP, and a correct DDP scaffold are implemented
+  (off by default); see docs/scaling.md.
 
 None of this should be used for real structural or affinity conclusions, docking decisions, or
-publication. See docs/roadmap.md for what closing these gaps would take.
+publication *until trained* -- the architecture and evaluation are real, the weights are not. See
+docs/scaling.md and docs/roadmap.md for what training at scale would take.

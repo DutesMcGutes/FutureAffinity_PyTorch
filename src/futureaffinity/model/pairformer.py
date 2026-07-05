@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import torch
+import torch.utils.checkpoint
 from torch import nn
 
 from futureaffinity.config import FutureAffinityConfig
@@ -77,7 +78,7 @@ class TriangleAttention(nn.Module):
     attention is the same operation applied to the transposed pair tensor.
     """
 
-    def __init__(self, pair_dim: int, num_heads: int, node: str = "starting") -> None:
+    def __init__(self, pair_dim: int, num_heads: int, node: str = "starting", chunk_size: int | None = None) -> None:
         super().__init__()
         if node not in ("starting", "ending"):
             raise ValueError(f"node must be 'starting' or 'ending', got {node!r}")
@@ -87,6 +88,10 @@ class TriangleAttention(nn.Module):
         self.node = node
         self.num_heads = num_heads
         self.head_dim = pair_dim // num_heads
+        # triangle attention materializes an (B, N, N, N, H) logits tensor -- O(N^3) memory, the
+        # dominant activation cost at long sequence length. When set, the query-row axis is
+        # processed in chunks of this size, trading a Python loop for a factor-N memory cut.
+        self.chunk_size = chunk_size
 
         self.norm = nn.LayerNorm(pair_dim)
         self.to_q = nn.Linear(pair_dim, pair_dim, bias=False)
@@ -100,6 +105,25 @@ class TriangleAttention(nn.Module):
         b, n, m, _ = x.shape
         return x.view(b, n, m, self.num_heads, self.head_dim)
 
+    def _attend(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch.Tensor, token_mask: torch.Tensor) -> torch.Tensor:
+        """Attention over query-row chunks. `q`/`k`/`v` (B, N, N, H, D), `bias` (B, N, N, H)."""
+        num_rows = q.shape[1]
+        chunk = self.chunk_size or num_rows
+        key_mask = token_mask[:, None, None, :, None]
+
+        outputs = []
+        for start in range(0, num_rows, chunk):
+            end = start + chunk
+            # each row i attends among its own columns, so q/k/v all slice on the shared row axis
+            q_chunk, k_chunk, v_chunk = q[:, start:end], k[:, start:end], v[:, start:end]
+            logits = torch.einsum("bijhd,bikhd->bijkh", q_chunk, k_chunk) / (self.head_dim**0.5)
+            logits = logits + bias[:, None, :, :, :]  # bias depends on (j, k) only, same for every row chunk
+            logits = logits.masked_fill(~key_mask, _NEG_INF)
+            attn = torch.softmax(logits, dim=3)
+            out_chunk = torch.einsum("bijkh,bikhd->bijhd", attn, v_chunk)
+            outputs.append(out_chunk.reshape(*out_chunk.shape[:3], -1))
+        return torch.cat(outputs, dim=1)
+
     def forward(self, pair: torch.Tensor, token_mask: torch.Tensor) -> torch.Tensor:
         if self.node == "ending":
             pair = pair.transpose(1, 2)
@@ -108,15 +132,7 @@ class TriangleAttention(nn.Module):
         q, k, v = self._split_heads(self.to_q(z)), self._split_heads(self.to_k(z)), self._split_heads(self.to_v(z))
         bias = self.to_bias(z)  # (B, N_j, N_k, H) -- uses the opposite edge, independent of row i
 
-        logits = torch.einsum("bijhd,bikhd->bijkh", q, k) / (self.head_dim**0.5)
-        logits = logits + bias[:, None, :, :, :]
-
-        key_mask = token_mask[:, None, None, :, None]
-        logits = logits.masked_fill(~key_mask, _NEG_INF)
-
-        attn = torch.softmax(logits, dim=3)
-        out = torch.einsum("bijkh,bikhd->bijhd", attn, v)
-        out = out.reshape(*out.shape[:3], -1)
+        out = self._attend(q, k, v, bias, token_mask)
 
         gate = torch.sigmoid(self.to_gate(z))
         out = gate * self.to_out(out)
@@ -176,8 +192,12 @@ class PairformerBlock(nn.Module):
         super().__init__()
         self.triangle_mult_outgoing = TriangleMultiplicativeUpdate(config.pair_dim, mode="outgoing")
         self.triangle_mult_incoming = TriangleMultiplicativeUpdate(config.pair_dim, mode="incoming")
-        self.triangle_attn_starting = TriangleAttention(config.pair_dim, config.num_attn_heads, node="starting")
-        self.triangle_attn_ending = TriangleAttention(config.pair_dim, config.num_attn_heads, node="ending")
+        self.triangle_attn_starting = TriangleAttention(
+            config.pair_dim, config.num_attn_heads, node="starting", chunk_size=config.triangle_attention_chunk_size
+        )
+        self.triangle_attn_ending = TriangleAttention(
+            config.pair_dim, config.num_attn_heads, node="ending", chunk_size=config.triangle_attention_chunk_size
+        )
         self.pair_transition = Transition(config.pair_dim)
 
         self.token_attention = AttentionWithPairBias(config.token_dim, config.pair_dim, config.num_attn_heads)
@@ -203,11 +223,21 @@ class PairformerBlock(nn.Module):
 class PairformerTrunk(nn.Module):
     def __init__(self, config: FutureAffinityConfig) -> None:
         super().__init__()
+        self.config = config
         self.blocks = nn.ModuleList(PairformerBlock(config) for _ in range(config.num_trunk_blocks))
 
     def forward(
         self, token: torch.Tensor, pair: torch.Tensor, token_mask: torch.Tensor, pair_mask: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        use_checkpoint = self.config.use_gradient_checkpointing and self.training and torch.is_grad_enabled()
         for block in self.blocks:
-            token, pair = block(token, pair, token_mask, pair_mask)
+            if use_checkpoint:
+                # recompute each block's activations in the backward pass instead of storing them:
+                # the standard trade of ~1 extra forward for a large activation-memory saving, which
+                # is what lets a deep (base/large) trunk fit at long sequence length.
+                token, pair = torch.utils.checkpoint.checkpoint(
+                    block, token, pair, token_mask, pair_mask, use_reentrant=False
+                )
+            else:
+                token, pair = block(token, pair, token_mask, pair_mask)
         return token, pair
