@@ -4,7 +4,7 @@ A pure PyTorch, multi-task co-folding + affinity foundation model: protein(+liga
 ensemble, per-token confidence, binding affinity, ΔΔG for point mutations, and uncertainty --
 all from one shared trunk.
 
-This is the "model" repo, analogous to `Alphafold3_PyTorch`. The paired teaching repo,
+This is the "model" repo, the paired teaching repo,
 `FutureAffinity_Repro`, walks through the same ideas from scratch with exercises and reference
 solutions.
 
